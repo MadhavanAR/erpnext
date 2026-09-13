@@ -9,6 +9,7 @@ from erpnext.buying.doctype.supplier_scorecard.supplier_scorecard import (
 	get_scorecard_date,
 	make_all_scorecards,
 )
+from erpnext.buying.doctype.supplier_scorecard.supplier_scorecard_dashboard import get_data
 from erpnext.tests.utils import ERPNextTestSuite
 
 
@@ -88,6 +89,34 @@ class TestSupplierScorecard(ERPNextTestSuite):
 		created = frappe.db.count("Supplier Scorecard Period", {"scorecard": doc.name, "docstatus": 1})
 		self.assertGreater(created, 0)
 		self.assertEqual(make_all_scorecards(doc.name), 0)
+
+	def test_supplier_scorecard_dashboard_connections_and_timeline(self):
+		supplier = create_test_supplier("_Test Supplier SC Dashboard")
+		frappe.db.set_value("Supplier", supplier, "creation", add_days(nowdate(), -75))
+
+		frappe.delete_doc_if_exists("Supplier Scorecard", supplier)
+		doc = make_supplier_scorecard()
+		doc.supplier = supplier
+		doc.name = supplier
+		doc.insert()
+
+		expected_count = frappe.db.count("Supplier Scorecard Period", {"scorecard": doc.name})
+		self.assertGreater(expected_count, 0)
+
+		# Verify the resolved dashboard endpoint (as invoked by form dashboard.js) returns both count and timeline_data
+		dashboard_data = get_data()
+		method = dashboard_data.get("method") or "frappe.desk.notifications.get_open_count"
+		endpoint_fn = frappe.get_attr(method)
+		result = endpoint_fn("Supplier Scorecard", doc.name)
+
+		self.assertIn("count", result)
+		external_counts = {
+			link["doctype"]: link["count"]
+			for link in result["count"].get("external_links_found", [])
+		}
+		self.assertIn("Supplier Scorecard Period", external_counts)
+		self.assertEqual(external_counts["Supplier Scorecard Period"], expected_count)
+		self.assertIn("timeline_data", result)
 
 
 def make_supplier_scorecard():
