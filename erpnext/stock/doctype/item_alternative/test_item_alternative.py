@@ -2,7 +2,7 @@
 # See license.txt
 
 import frappe
-from frappe.utils import flt, random_string
+from frappe.utils import cint, flt, random_string
 
 from erpnext.controllers.subcontracting_controller import make_rm_stock_entry
 from erpnext.controllers.tests.test_subcontracting_controller import (
@@ -14,7 +14,12 @@ from erpnext.manufacturing.doctype.production_plan.test_production_plan import m
 from erpnext.manufacturing.doctype.work_order.mapper import make_stock_entry
 from erpnext.manufacturing.doctype.work_order.test_work_order import make_wo_order_test_record
 from erpnext.stock.doctype.item.test_item import create_item
-from erpnext.stock.doctype.item_alternative.item_alternative import get_alternative_items
+from erpnext.stock.doctype.item_alternative.item_alternative import (
+	get_alternative_items,
+	is_alternative_allowed,
+	validate_alternative_item_for_bom,
+)
+from erpnext.stock.doctype.stock_entry.services.manufacturing import get_alternative_finished_goods
 from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import (
 	EmptyStockReconciliationItemsError,
 )
@@ -440,16 +445,354 @@ class TestItemAlternative(ERPNextTestSuite):
 		self.assertEqual(set(collected), set(full))  # nothing dropped by the per-leg limit
 		self.assertEqual(collected.count(dup), 1)  # the cross-leg dup survives exactly once
 
+	def test_unrestricted_alternative_remains_global(self):
+		"""Unrestricted A → B stays available with or without BOM context."""
+		items, bom_x, _bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(items.source, items.alt_b, two_way=0)
 
-def make_item_alternative(item_code, alternative_item_code, two_way=0):
+		without_bom = _alt_codes(items.source)
+		with_bom_x = _alt_codes(items.source, bom_x)
+		with_bom_y = _alt_codes(items.source, _bom_y)
+
+		self.assertIn(items.alt_b, without_bom)
+		self.assertIn(items.alt_b, with_bom_x)
+		self.assertIn(items.alt_b, with_bom_y)
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, bom_x))
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, _bom_y))
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, None))
+
+	def test_restricted_alternative_allowed_for_matching_bom(self):
+		items, bom_x, _bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		self.assertIn(items.alt_b, _alt_codes(items.source, bom_x))
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, bom_x))
+
+	def test_restricted_alternative_hidden_for_wrong_bom(self):
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		self.assertNotIn(items.alt_b, _alt_codes(items.source, bom_y))
+		self.assertNotIn(items.alt_b, _alt_codes(items.source))
+		self.assertFalse(is_alternative_allowed(items.source, items.alt_b, bom_y))
+		self.assertFalse(is_alternative_allowed(items.source, items.alt_b, None))
+
+	def test_server_rejects_restricted_alternative_on_wrong_bom(self):
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		self.assertRaises(
+			frappe.ValidationError,
+			validate_alternative_item_for_bom,
+			items.source,
+			items.alt_b,
+			bom_y,
+		)
+		# Matching BOM remains allowed
+		validate_alternative_item_for_bom(items.source, items.alt_b, bom_x)
+
+	def test_different_alternatives_per_bom(self):
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+		make_item_alternative(
+			items.source, items.alt_c, two_way=0, restrict_to_boms=1, applicable_boms=[bom_y]
+		)
+
+		alts_x = _alt_codes(items.source, bom_x)
+		alts_y = _alt_codes(items.source, bom_y)
+
+		self.assertIn(items.alt_b, alts_x)
+		self.assertNotIn(items.alt_c, alts_x)
+		self.assertIn(items.alt_c, alts_y)
+		self.assertNotIn(items.alt_b, alts_y)
+
+	def test_restricted_alternative_with_multiple_boms(self):
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source,
+			items.alt_b,
+			two_way=0,
+			restrict_to_boms=1,
+			applicable_boms=[bom_x, bom_y],
+		)
+
+		self.assertIn(items.alt_b, _alt_codes(items.source, bom_x))
+		self.assertIn(items.alt_b, _alt_codes(items.source, bom_y))
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, bom_x))
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, bom_y))
+
+	def test_restrict_to_boms_disabled_is_global(self):
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=0, applicable_boms=[bom_x]
+		)
+
+		# Master clears applicable_boms when restrict is off
+		doc = frappe.get_doc(
+			"Item Alternative", {"item_code": items.source, "alternative_item_code": items.alt_b}
+		)
+		self.assertEqual(doc.restrict_to_boms, 0)
+		self.assertEqual(len(doc.applicable_boms), 0)
+
+		self.assertIn(items.alt_b, _alt_codes(items.source))
+		self.assertIn(items.alt_b, _alt_codes(items.source, bom_y))
+
+	def test_existing_unrestricted_records_unchanged(self):
+		"""Legacy-style Item Alternative without restriction fields behaves globally."""
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		doc = make_item_alternative(items.source, items.alt_b, two_way=0)
+		self.assertEqual(cint(doc.restrict_to_boms), 0)
+		self.assertEqual(doc.applicable_boms, [])
+
+		self.assertIn(items.alt_b, _alt_codes(items.source))
+		self.assertIn(items.alt_b, _alt_codes(items.source, bom_x))
+		self.assertIn(items.alt_b, _alt_codes(items.source, bom_y))
+
+	def test_two_way_inherits_bom_restriction(self):
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=1, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		# Reverse lookup B → A on matching BOM
+		self.assertIn(items.source, _alt_codes(items.alt_b, bom_x))
+		self.assertTrue(is_alternative_allowed(items.alt_b, items.source, bom_x))
+
+		# Reverse lookup on wrong BOM / without BOM context
+		self.assertNotIn(items.source, _alt_codes(items.alt_b, bom_y))
+		self.assertNotIn(items.source, _alt_codes(items.alt_b))
+		self.assertFalse(is_alternative_allowed(items.alt_b, items.source, bom_y))
+
+	def test_unregistered_substitution_still_allowed(self):
+		"""No Item Alternative record → substitution remains allowed (existing behaviour)."""
+		items, bom_x, _bom_y = self._make_bom_restriction_fixture()
+
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, bom_x))
+		self.assertTrue(is_alternative_allowed(items.source, items.alt_b, None))
+		validate_alternative_item_for_bom(items.source, items.alt_b, bom_x)
+
+	def test_stock_entry_rejects_restricted_alternative_bypass(self):
+		"""API/direct Stock Entry with a wrong-BOM restricted alternative must fail validation."""
+		items, bom_x, bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		warehouse = "_Test Warehouse - _TC"
+		create_stock_reconciliation(item_code=items.alt_b, warehouse=warehouse, qty=10, rate=100)
+
+		wo = make_wo_order_test_record(
+			production_item=items.fg_y,
+			bom_no=bom_y,
+			qty=1,
+			source_warehouse=warehouse,
+			wip_warehouse=warehouse,
+			fg_warehouse=warehouse,
+			skip_transfer=1,
+		)
+
+		ste = frappe.get_doc(make_stock_entry(wo.name, "Manufacture", 1))
+		ste.insert()
+
+		# Bypass the Alternate Item picker: force a restricted alternative for the wrong BOM
+		rm_row = next(d for d in ste.items if d.item_code == items.source)
+		rm_row.item_code = items.alt_b
+		rm_row.original_item = items.source
+
+		self.assertRaises(frappe.ValidationError, ste.save)
+
+		# Matching BOM still accepts the same substitution
+		wo_ok = make_wo_order_test_record(
+			production_item=items.fg_x,
+			bom_no=bom_x,
+			qty=1,
+			source_warehouse=warehouse,
+			wip_warehouse=warehouse,
+			fg_warehouse=warehouse,
+			skip_transfer=1,
+		)
+		ste_ok = frappe.get_doc(make_stock_entry(wo_ok.name, "Manufacture", 1))
+		ste_ok.insert()
+		rm_ok = next(d for d in ste_ok.items if d.item_code == items.source)
+		rm_ok.item_code = items.alt_b
+		rm_ok.original_item = items.source
+		ste_ok.save()
+		self.assertEqual(rm_ok.item_code, items.alt_b)
+		self.assertEqual(rm_ok.original_item, items.source)
+
+	def test_restricted_alternative_rejected_without_bom_context(self):
+		"""Restricted alternatives must not slip through BOM-less manufacturing entries."""
+		items, bom_x, _bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		warehouse = "_Test Warehouse - _TC"
+		create_stock_reconciliation(item_code=items.alt_b, warehouse=warehouse, qty=5, rate=100)
+		create_stock_reconciliation(item_code=items.rm2, warehouse=warehouse, qty=5, rate=100)
+
+		ste = frappe.get_doc(
+			{
+				"doctype": "Stock Entry",
+				"stock_entry_type": "Manufacture",
+				"purpose": "Manufacture",
+				"company": "_Test Company",
+				"fg_completed_qty": 1,
+				"items": [
+					{
+						"item_code": items.alt_b,
+						"original_item": items.source,
+						"qty": 1,
+						"s_warehouse": warehouse,
+						"allow_alternative_item": 1,
+					},
+					{
+						"item_code": items.fg_x,
+						"qty": 1,
+						"t_warehouse": warehouse,
+						"is_finished_item": 1,
+					},
+				],
+			}
+		)
+		self.assertRaises(frappe.ValidationError, ste.insert)
+
+	def test_allowed_transfer_preserves_original_item_on_manufacture(self):
+		items, bom_x, _bom_y = self._make_bom_restriction_fixture()
+		make_item_alternative(
+			items.source, items.alt_b, two_way=0, restrict_to_boms=1, applicable_boms=[bom_x]
+		)
+
+		warehouse = "_Test Warehouse - _TC"
+		wip = "Stores - _TC"
+		create_stock_reconciliation(item_code=items.alt_b, warehouse=warehouse, qty=5, rate=100)
+		create_stock_reconciliation(item_code=items.rm2, warehouse=warehouse, qty=5, rate=100)
+
+		wo = make_wo_order_test_record(
+			production_item=items.fg_x,
+			bom_no=bom_x,
+			qty=1,
+			source_warehouse=warehouse,
+			wip_warehouse=wip,
+			fg_warehouse=warehouse,
+		)
+
+		transfer = frappe.get_doc(make_stock_entry(wo.name, "Material Transfer for Manufacture", 1))
+		transfer.insert()
+		for row in transfer.items:
+			if row.item_code == items.source:
+				row.item_code = items.alt_b
+				row.original_item = items.source
+		transfer.save()
+		transfer.submit()
+
+		manufacture = frappe.get_doc(make_stock_entry(wo.name, "Manufacture", 1))
+		manufacture.insert()
+
+		rm_rows = [d for d in manufacture.items if d.s_warehouse]
+		alt_row = next((d for d in rm_rows if d.item_code == items.alt_b), None)
+		self.assertIsNotNone(alt_row)
+		self.assertEqual(alt_row.original_item, items.source)
+
+	def test_finished_goods_alternatives_ignore_bom_restriction(self):
+		"""BOM restriction must not change get_alternative_finished_goods."""
+		suffix = random_string(8)
+		fg = f"_Test IA FG Conv {suffix}"
+		alt_fg = f"_Test IA FG Alt {suffix}"
+		dummy_rm = f"_Test IA FG RM {suffix}"
+
+		for code in (fg, alt_fg, dummy_rm):
+			create_item(code)
+			item = frappe.get_doc("Item", code)
+			item.allow_alternative_item = 1
+			item.save()
+
+		bom = make_bom(item=fg, raw_materials=[dummy_rm], company="_Test Company")
+		# Restrict the FG→alt_fg pair to this BOM; finished-goods lookup must still return it
+		# regardless of BOM context (API does not take a BOM).
+		make_item_alternative(fg, alt_fg, two_way=0, restrict_to_boms=1, applicable_boms=[bom.name])
+
+		alternatives = get_alternative_finished_goods(fg)
+		self.assertIn(alt_fg, alternatives)
+
+	def test_restrict_to_boms_requires_applicable_bom(self):
+		items, _bom_x, _bom_y = self._make_bom_restriction_fixture()
+		doc = frappe.get_doc(
+			{
+				"doctype": "Item Alternative",
+				"item_code": items.source,
+				"alternative_item_code": items.alt_b,
+				"restrict_to_boms": 1,
+			}
+		)
+		self.assertRaises(frappe.MandatoryError, doc.insert)
+
+	def test_duplicate_applicable_bom_rejected(self):
+		items, bom_x, _bom_y = self._make_bom_restriction_fixture()
+		doc = frappe.get_doc(
+			{
+				"doctype": "Item Alternative",
+				"item_code": items.source,
+				"alternative_item_code": items.alt_b,
+				"restrict_to_boms": 1,
+				"applicable_boms": [{"bom": bom_x}, {"bom": bom_x}],
+			}
+		)
+		self.assertRaises(frappe.ValidationError, doc.insert)
+
+	def _make_bom_restriction_fixture(self):
+		suffix = random_string(8)
+		items = frappe._dict(
+			source=f"_Test IA Src {suffix}",
+			alt_b=f"_Test IA AltB {suffix}",
+			alt_c=f"_Test IA AltC {suffix}",
+			rm2=f"_Test IA RM2 {suffix}",
+			fg_x=f"_Test IA FGX {suffix}",
+			fg_y=f"_Test IA FGY {suffix}",
+		)
+		for code in items.values():
+			create_item(code)
+			item = frappe.get_doc("Item", code)
+			if not item.allow_alternative_item:
+				item.allow_alternative_item = 1
+				item.save()
+
+		bom_x = make_bom(
+			item=items.fg_x, raw_materials=[items.source, items.rm2], company="_Test Company"
+		).name
+		bom_y = make_bom(
+			item=items.fg_y, raw_materials=[items.source, items.rm2], company="_Test Company"
+		).name
+		return items, bom_x, bom_y
+
+
+def _alt_codes(item_code, bom_no=None):
+	filters = {"item_code": item_code}
+	if bom_no:
+		filters["bom_no"] = bom_no
+	return [row[0] for row in get_alternative_items("Item", "", "name", 0, 50, filters)]
+
+
+def make_item_alternative(item_code, alternative_item_code, two_way=0, restrict_to_boms=0, applicable_boms=None):
 	doc = frappe.get_doc(
 		{
 			"doctype": "Item Alternative",
 			"item_code": item_code,
 			"alternative_item_code": alternative_item_code,
 			"two_way": two_way,
+			"restrict_to_boms": restrict_to_boms,
 		}
 	)
+	for bom in applicable_boms or []:
+		doc.append("applicable_boms", {"bom": bom})
 	doc.insert()
 	return doc
 

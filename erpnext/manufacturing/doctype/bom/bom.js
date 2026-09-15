@@ -309,6 +309,7 @@ frappe.ui.form.on("BOM", {
 						warehouse_field: "source_warehouse",
 						child_doctype: "BOM Item",
 						original_item_field: "original_item",
+						bom_no: frm.doc.name,
 						condition: (d) => {
 							if (d.allow_alternative_item) {
 								return true;

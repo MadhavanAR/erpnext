@@ -166,6 +166,7 @@ frappe.ui.form.on("Work Order", {
 					warehouse_field: "source_warehouse",
 					child_doctype: "Work Order Item",
 					original_item_field: "original_item",
+					bom_no: frm.doc.bom_no,
 					condition: (d) => {
 						if (d.allow_alternative_item) {
 							return true;

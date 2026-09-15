@@ -10,5 +10,21 @@ frappe.ui.form.on("Item Alternative", {
 				},
 			};
 		};
+
+		frm.set_query("bom", "applicable_boms", () => {
+			return {
+				filters: {
+					docstatus: 1,
+					is_active: 1,
+				},
+			};
+		});
+	},
+
+	restrict_to_boms: function (frm) {
+		if (!frm.doc.restrict_to_boms) {
+			frm.clear_table("applicable_boms");
+			frm.refresh_field("applicable_boms");
+		}
 	},
 });

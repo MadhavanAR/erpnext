@@ -343,6 +343,7 @@ frappe.ui.form.on("Stock Entry", {
 						warehouse_field: "s_warehouse",
 						child_doctype: "Stock Entry Detail",
 						original_item_field: "original_item",
+						bom_no: frm.doc.bom_no,
 						condition: (d) => {
 							if (d.s_warehouse && d.allow_alternative_item) {
 								return true;

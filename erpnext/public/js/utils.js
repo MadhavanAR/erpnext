@@ -653,11 +653,15 @@ erpnext.utils.select_alternate_items = function (opts) {
 							}
 						},
 						get_query: (e) => {
+							const filters = {
+								item_code: e.item_code,
+							};
+							if (opts.bom_no) {
+								filters.bom_no = opts.bom_no;
+							}
 							return {
 								query: "erpnext.stock.doctype.item_alternative.item_alternative.get_alternative_items",
-								filters: {
-									item_code: e.item_code,
-								},
+								filters: filters,
 							};
 						},
 					},

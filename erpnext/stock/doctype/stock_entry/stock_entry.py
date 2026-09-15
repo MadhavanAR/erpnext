@@ -316,6 +316,7 @@ class StockEntry(StockController, SubcontractingInwardController):
 		sbb.validate_warehouse_of_sabb()
 		self.validate_source_stock_entry()
 		self.validate_bom()
+		self.validate_alternative_item_bom()
 		self.set_process_loss_qty()
 		self.validate_company_in_accounting_dimension()
 
@@ -1000,6 +1001,31 @@ class StockEntry(StockController, SubcontractingInwardController):
 			if d.bom_no and d.is_finished_item:
 				item_code = d.original_item or d.item_code
 				validate_bom_no(item_code, d.bom_no)
+
+	def validate_alternative_item_bom(self):
+		"""Reject BOM-restricted Item Alternatives used against the wrong manufacturing BOM.
+
+		Unregistered original_item substitutions remain allowed — only enforce when a matching
+		restricted Item Alternative record exists. Missing BOM context rejects restricted pairs.
+		"""
+		if self.purpose not in (
+			"Material Transfer for Manufacture",
+			"Manufacture",
+			"Material Consumption for Manufacture",
+		):
+			return
+
+		bom_no = self.bom_no
+		if not bom_no and self.work_order:
+			bom_no = frappe.db.get_value("Work Order", self.work_order, "bom_no")
+
+		from erpnext.stock.doctype.item_alternative.item_alternative import (
+			validate_alternative_item_for_bom,
+		)
+
+		for d in self.get("items"):
+			if d.original_item and d.original_item != d.item_code:
+				validate_alternative_item_for_bom(d.original_item, d.item_code, bom_no, row=d)
 
 	def validate_closed_subcontracting_order(self):
 		order = self.get("subcontracting_order") or self.get("subcontracting_inward_order")

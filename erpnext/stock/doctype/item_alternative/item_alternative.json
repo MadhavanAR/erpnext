@@ -10,7 +10,10 @@
   "two_way",
   "column_break_4",
   "item_name",
-  "alternative_item_name"
+  "alternative_item_name",
+  "bom_restriction_section",
+  "restrict_to_boms",
+  "applicable_boms"
  ],
  "fields": [
   {
@@ -48,10 +51,31 @@
    "fieldname": "alternative_item_name",
    "fieldtype": "Read Only",
    "label": "Alternative Item Name"
+  },
+  {
+   "fieldname": "bom_restriction_section",
+   "fieldtype": "Section Break",
+   "label": "BOM Restriction"
+  },
+  {
+   "default": "0",
+   "description": "By default, an Item Alternative is available globally for manufacturing substitution. Enable this to allow the alternative only for the BOMs listed below. Unrestricted alternatives remain unchanged.",
+   "fieldname": "restrict_to_boms",
+   "fieldtype": "Check",
+   "label": "Restrict to BOMs"
+  },
+  {
+   "depends_on": "eval:doc.restrict_to_boms",
+   "description": "This alternative may only be selected when the manufacturing document uses one of these BOMs.",
+   "fieldname": "applicable_boms",
+   "fieldtype": "Table",
+   "label": "Applicable BOMs",
+   "mandatory_depends_on": "eval:doc.restrict_to_boms",
+   "options": "Item Alternative BOM"
   }
  ],
  "links": [],
- "modified": "2024-03-27 13:09:53.809482",
+ "modified": "2026-09-15 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Stock",
  "name": "Item Alternative",
